@@ -1,11 +1,11 @@
 ---
-title: "REPORT_2"
+title: "REPORT"
 author: "Mark Blum"
 format: html
 editor: visual
 ---
 
-# Analys Berner Stadtrat
+# Analyse Berner Stadtrat
 
 ```{r}
 library(rjson)
