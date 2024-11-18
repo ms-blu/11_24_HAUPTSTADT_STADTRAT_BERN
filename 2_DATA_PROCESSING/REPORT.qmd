@@ -1,0 +1,376 @@
+---
+title: "REPORT"
+author: "Mark Blum"
+format: html
+editor: visual
+---
+
+# Analyse Berner Stadtrat
+
+```{r}
+library(rjson)
+library(quanteda)
+library(quanteda.textstats)
+library(tidyverse)
+library(scales)
+library(lme4)
+library(quanteda.textplots)
+```
+
+
+## Datenaufbereitung
+
+
+```{r json}
+json<-fromJSON(file="orig_08_20.json")
+rm(list=setdiff(ls(), "json"))
+```
+
+```{r Erstellung Datensatz}
+date<-c()
+name<-c()
+duration <- c()
+partei <-c()
+rolle<-c()
+sitzung<-c()
+node<-c()
+text<-c()
+n=0
+for(i in 1:length(json)){
+  for (j  in 1:length(json[[i]])) {
+    ## filtering out Abstimmungen
+    if(json[[i]][[j]]["title"] == "SEGMENT_TYPE_SPEAKER"){
+      n<-n+1
+      json[[i]][[j]][["deputyFullname"]] ->name[n]
+      json[[i]][[j]][["entryDate"]] -> date[n]
+      json[[i]][[j]][["segmentDuration"]] -> duration[n]
+      json[[i]][[j]][["politicalGroup"]] -> partei[n]
+      json[[i]][[j]][["deputyRole"]] -> rolle[n]
+      json[[i]][[j]][["entryTitle"]]-> sitzung[n]
+      json[[i]][[j]][["textFormat"]] -> text[n]
+      node[n]<-paste(i,j)
+    }
+    
+  }
+}
+date  |>  as.Date()->date
+
+data.frame(date, 
+           name,
+           duration,
+           partei,
+           rolle,
+           node,
+           sitzung,
+           text)->df
+rm(date, name, duration, partei, rolle, node, sitzung, text, i, j, n)
+
+```
+
+```{r Anfügen Information zu Geschlecht}
+geschlecht<-read.csv("speakers_gender.csv")
+
+df<- merge(df, geschlecht, by.x="name", by.y = "speaker")
+```
+
+```{r cleaning}
+# Assigning missing party names
+
+df$partei[df$name=="Marieke Kruit"]<-"SP"
+df$partei[df$name=="Franziska Teuscher"]<-"GB"
+df$partei[df$name=="Michael Aebersold"]<-"SP"
+df$partei[df$name=="Reto Nause"]<-"Mitte"
+df$partei[df$name=="Alec von Graffenried"]<-"GFL"
+df$partei[df$name=="Thomas Iten"]<-"parteilos"
+
+df$partei[df$partei==""]<-"Gast"
+
+# removing html tags from text
+
+df$cleantext<-NA
+for (i in 1:length(df$text)) {
+  gsub("<[^>]*>", "", df$text[i])->df$cleantext[i]
+  sub("[^:]*:","",df$cleantext[i])->df$text_nolab[i]
+}
+rm(i)
+
+
+# renaming misnamed session
+df$sitzung[df$sitzung=="18. 26.10.2023, 17:00 genehmigt"]<-"18. 26.10.2023, 17:00"
+
+
+# Datensatz ohne Ratspräsident*in
+df_nopres<-df |> filter(name!= "Michael Hoekstra" & name!= "Valentina Achermann")
+
+
+# Datensatz ohne Gemeinderat
+df_noGR<-df_nopres |> filter(name!="Marieke Kruit"&
+                              name!="Franziska Teuscher"&
+                               name!="Michael Aebersold"&
+                              name!="Reto Nause"&
+                              name!="Alec von Graffenried"&
+                              name!="Thomas Iten")
+```
+
+```{r}
+rm(list = c("json", "geschlecht"))
+```
+
+
+## Erstellung CSV
+### Top 10 Stadträt*innen nach Redezeit mit ALLEN
+```{r}
+filename<-"csv/1_top10_speakingTime"
+
+aggregate(df$duration, by=list(df$name), FUN=sum)->redezeit_agg_mitglied
+redezeit_agg_mitglied |> select(name=Group.1, redezeit=x)->redezeit_agg_mitglied
+redezeit_agg_mitglied |> filter(redezeit>=6622)->redezeit_agg_mitglied
+write.csv(redezeit_agg_mitglied,file = filename)
+
+```
+
+
+### Top 10 Stadträt*innen nach Redezeit
+
+```{r}
+filename<-"csv/2_top10_speakingTime_excl_president_execkutive"
+
+aggregate(df_noGR$duration, by=list(df_noGR$name), FUN=sum)->redezeit_agg_mitglied
+redezeit_agg_mitglied |> select(name=Group.1, redezeit=x)->redezeit_agg_mitglied
+redezeit_agg_mitglied |> filter(redezeit>=5400)->redezeit_agg_mitglied
+write.csv(redezeit_agg_mitglied,file = filename)
+
+```
+
+### Redezeit nach Geschlecht
+
+```{r}
+filename<-"csv/3_speakingTime_gendered"
+
+aggregate(df_noGR$duration, by=list(df_noGR$speaker_gender), FUN=sum)->redezeit_agg_geschlecht_noGR
+redezeit_agg_geschlecht_noGR |> select(geschlecht=Group.1, redezeit=x)->redezeit_agg_geschlecht_noGR
+write.csv(redezeit_agg_geschlecht_noGR,file = filename)
+```
+
+### Verhältnis Redezeit zu Sitze nach Geschlecht
+
+Quelle aktuelle Sitzzahl:
+https://www.bern.ch/themen/gesundheit-alter-und-soziales/gleichstellung-in-geschlechterfragen/gleichstellung-und-politik
+
+```{r}
+filename<-"csv/4_speakingTime_gendered_weighed"
+
+aggregate(df_noGR$duration, by=list(df_noGR$speaker_gender), FUN=sum)->redezeit_agg_geschlecht_noGR
+redezeit_agg_geschlecht_noGR |> select(geschlecht=Group.1, redezeit=x)->redezeit_agg_geschlecht_noGR
+redezeit_agg_geschlecht_noGR$sitze_aktuell[redezeit_agg_geschlecht_noGR$geschlecht=="male"]<-36
+redezeit_agg_geschlecht_noGR$sitze_aktuell[redezeit_agg_geschlecht_noGR$geschlecht=="female"]<-43
+redezeit_agg_geschlecht_noGR$sitze_aktuell[redezeit_agg_geschlecht_noGR$geschlecht=="nonbinary"]<-1
+
+
+write.csv(redezeit_agg_geschlecht_noGR,file = filename)
+
+```
+
+
+
+
+
+#### EXKURS: Fixed Effect Geschlecht pro Sitzung
+```{r}
+aggregate(df_noGR$duration, by=list(df_noGR$name, df_noGR$sitzung, df_noGR$speaker_gender), FUN=sum)->redezeit_sitzung_gender
+redezeit_sitzung_gender |> select(name=Group.1, sitzung=Group.2, gender=Group.3, redezeit=x)->redezeit_sitzung_gender
+
+write.csv(redezeit_sitzung_gender,file = "csv/010_redezeit_sitzung_gender")
+```
+
+
+
+
+```{r}
+lmer(data = redezeit_sitzung_gender, redezeit~gender +(1|sitzung))
+```
+```{r}
+noFeuz<-redezeit_sitzung_gender
+for (i in redezeit_sitzung_gender$sitzung |> unique()) {
+  mean(redezeit_sitzung_gender$redezeit[redezeit_sitzung_gender$gender=="male" & redezeit_sitzung_gender$name!="Alexander Feuz" & redezeit_sitzung_gender$sitzung == i])->noFeuz$redezeit[noFeuz$name=="Alexander Feuz" & noFeuz$sitzung==i]
+}
+
+```
+
+```{r}
+lmer(data = noFeuz, redezeit~gender +(1|sitzung))
+```
+### Verhältnis Redezeit zu Sitze nach Geschlecht ohne Feuz
+
+```{r}
+filename <- "csv/5_speakingTime_gendered_weighed_noFeuz"
+
+aggregate(noFeuz$redezeit, by=list(noFeuz$gender), FUN=sum)->redezeit_noFeuz_gender
+redezeit_noFeuz_gender |> select(geschlecht=Group.1, redezeit=x)->redezeit_noFeuz_gender
+redezeit_noFeuz_gender$sitze_aktuell[redezeit_noFeuz_gender$geschlecht=="male"]<-36
+redezeit_noFeuz_gender$sitze_aktuell[redezeit_noFeuz_gender$geschlecht=="female"]<-43
+redezeit_noFeuz_gender$sitze_aktuell[redezeit_noFeuz_gender$geschlecht=="nonbinary"]<-1
+
+
+write.csv(redezeit_noFeuz_gender,file = filename)
+
+```
+
+### Parteien Nach Redezeit
+
+```{r}
+filename<-"csv/6_speakingTime_parteien"
+
+aggregate(df_noGR$duration, by=list(df_noGR$partei), FUN=sum)->redezeit_agg_partei_noGR
+redezeit_agg_partei_noGR |> select(partei=Group.1, redezeit=x)->redezeit_agg_partei_noGR
+write.csv(redezeit_agg_partei_noGR,file = filename)
+```
+
+### Parteien nach Redezeit, Gewichtet nach Sitzen
+
+Quelle aktuelle Sitzzahl:
+
+```{r}
+
+Stadtrat_aktuell <- read_csv("Stadtrat_aktuell.csv")
+table(Stadtrat_aktuell$ParteiKurz)
+```
+
+```{r}
+filename<-"csv/7_speakingTime_parteien_weighed"
+
+aggregate(df_noGR$duration, by=list(df_noGR$partei), FUN=sum)->redezeit_agg_partei_noGR
+redezeit_agg_partei_noGR |> select(partei=Group.1, redezeit=x)->redezeit_agg_partei_noGR
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="AL"]<-3
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="EVP"]<-2
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="FDP"]<-6
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="GaP"]<-1
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="GB"]<-10
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="GFL"]<-8
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="GLP"]<-7
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="JF"]<-1
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="JGLP"]<-2
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="JA!"]<-3
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="JUSO"]<-1
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="Mitte"]<-4
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="parteilos"]<-1
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="PdA"]<-1
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="SP"]<-22
+redezeit_agg_partei_noGR$sitze_aktuell[redezeit_agg_partei_noGR$partei=="SVP"]<-7
+
+
+
+write.csv(redezeit_agg_partei_noGR,file = filename)
+
+```
+
+
+#### EXKURS: Fixed Effect Partei pro Sitzung
+```{r}
+aggregate(df_noGR$duration, by=list(df_noGR$name, df_noGR$sitzung, df_noGR$partei), FUN=sum)->redezeit_sitzung_partei
+redezeit_sitzung_partei |> select(name=Group.1, sitzung=Group.2, partei=Group.3, redezeit=x)->redezeit_sitzung_partei
+
+```
+
+
+```{r}
+lm(data = redezeit_sitzung_gender, redezeit~gender)
+lmer(data = redezeit_sitzung_gender, redezeit~gender +(1|sitzung))
+
+lmer(data = redezeit_sitzung_partei, redezeit~partei +(1|sitzung))
+```
+
+```{r}
+noFeuzP<-redezeit_sitzung_partei
+for (i in redezeit_sitzung_partei$sitzung |> unique()) {
+  mean(redezeit_sitzung_partei$redezeit[redezeit_sitzung_partei$partei=="SVP" &
+                                          redezeit_sitzung_partei$name!="Alexander Feuz" &
+                                          redezeit_sitzung_partei$sitzung == i
+                                        ])->noFeuzP$redezeit[noFeuzP$name=="Alexander Feuz" & noFeuzP$sitzung==i]
+}
+
+# manchmal (in 9 Sitzungen) spricht feuz als einziger von der Fraktion
+# wir nehmen den Durchschnitt der restlichen Werten
+for (i in noFeuzP$sitzung[noFeuzP$redezeit |> is.na()==T]){
+  noFeuzP$redezeit[noFeuzP$sitzung==i]<-noFeuzP$redezeit[noFeuzP$redezeit |> is.na()==F] |> mean()}
+
+```
+
+```{r}
+lmer(data = noFeuzP, redezeit~partei +(1|sitzung))
+```
+### Parteien nach Redezeit, Gewichtet nach Sitzen ohne Feuz
+
+```{r}
+filename <- "csv/8_speakingTime_parteien_weighed_noFeuz"
+
+aggregate(noFeuzP$redezeit, by=list(noFeuzP$partei), FUN=sum)->redezeit_noFeuz_partei
+redezeit_noFeuz_partei |> select(partei=Group.1, redezeit=x)->redezeit_noFeuz_partei
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="AL"]<-3
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="EVP"]<-2
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="FDP"]<-6
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="GaP"]<-1
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="GB"]<-10
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="GFL"]<-8
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="GLP"]<-7
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="JF"]<-1
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="JGLP"]<-2
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="JA!"]<-3
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="JUSO"]<-1
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="Mitte"]<-4
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="parteilos"]<-1
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="PdA"]<-1
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="SP"]<-22
+redezeit_noFeuz_partei$sitze_aktuell[redezeit_noFeuz_partei$partei=="SVP"]<-7
+
+
+write.csv(redezeit_noFeuz_partei,file = filename)
+
+```
+
+
+# Textanalyse
+
+
+```{r corpus}
+rm(list=setdiff(ls(), "df_noGR"))
+corp<-corpus(df_noGR, text_field = "text_nolab")
+#corp_reshape <- corpus_reshape(corp, to = "paragraphs")
+```
+
+
+## Stichwortsuche
+
+```{r}
+dict <- dictionary(list(reitschule = c("reitschule",	"schützenmatte",	"dachstock",	"vorplatz",	"schütz"),
+                        klima =c("klima*",	"erderwärmung",	"co2",	"global warming",	"globale erwärmung"),
+                        velo=c("velo*",	"fahrrad*",	"bike",	"radfahren",	"drahtesel"),
+                        wirtschaft=c("wirtschaft*", "kmu*")
+                        ))
+
+dfmat_dict <- tokens(corp) |>
+  tokens_lookup(dictionary = dict) |>
+  dfm()
+dfmat_dict |> dfm_group(groups = partei) |> convert(to="data.frame") ->df_mentions
+```
+
+```{r}
+write.csv(df_mentions, file = "csv/9_stichwortsuche")
+```
+
+## Wordcloud
+
+```{r}
+png("wordcloud.png", width = 1920, height = 1920, bg = "transparent")
+corp |>
+tokens(remove_punct = T) |>
+tokens_remove(pattern = stopwords("de", source="marimo")) |>
+dfm() |>
+textplot_wordcloud(color="black", bg = "transparent")
+dev.off()
+```
+
+
+
+
+
